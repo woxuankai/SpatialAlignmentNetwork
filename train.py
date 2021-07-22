@@ -355,7 +355,7 @@ if __name__ == '__main__':
     parser.add_argument('--mask_losses', type=str, required=True, nargs='*', \
             help='losses for mask',
             metavar='NAME1:WEIGHT1 NAME2:WEIGHT2')
-    parser.add_argument('--smooth_weight', type=float, required=True, \
+    parser.add_argument('--smooth_weight', type=float, default=100, \
             help='weight for deformation field smoothness',
             metavar='Float')
     #parser.add_argument('--sim_weight', type=float, required=True, \
