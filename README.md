@@ -46,15 +46,15 @@ conventional deep-learning-based reconstruction is shown in black
 arrows; and the red arrows are for additional data flow related to
 our proposed spatial alignment network.
 
-For more details on the proposed methods, please refer to [arXiv preprint arXiv:2108.05603](https://arxiv.org/abs/2108.05603).
+For more details on the proposed method, please refer to [arXiv preprint arXiv:2108.05603](https://arxiv.org/abs/2108.05603).
 
 ## Experiments on fastMRI DICOM
 ### Prepare data
 Store data in h5 files
-1. Unzip fastMRI brain DICOM to `brain_dicom` folder.
+1. Unzip fastMRI brain DICOM to `fastMRI_brain_DICOM` folder.
 2. Convert all dicom to `brain_nii` folder.
 ```bash
-ls /mnt/mnt1/fastMRI_brain_DICOM | while read X; \
+ls fastMRI_brain_DICOM | while read X; \
 do XX="brain_nii/${X}"; mkdir ${XX}; \
 echo "dcm2niix -z n -f '%j-%p' -o ${XX} brain_dicom/${X} 2>${XX}/error.log 1>${XX}/out.log"; \
 done | parallel --bar
@@ -63,11 +63,11 @@ done | parallel --bar
 ```bash
 # T1 modality
 cat t1_t2_paired_6875_train.csv t1_t2_paired_6875_val.csv | cut -f1 -d ',' | while read x; \
-do convert_fastMRIDICOM.py "${x%.h5}.nii" "${x}" T1; \
+do python3 convert_fastMRIDICOM.py "${x%.h5}.nii" "${x}" T1; \
 done
 # T2 modality
 cat t1_t2_paired_6875_train.csv t1_t2_paired_6875_val.csv | cut -f2 -d ',' | while read x; \
-do convert_fastMRIDICOM.py "${x%.h5}.nii" "${x}" T2;
+do python3 convert_fastMRIDICOM.py "${x%.h5}.nii" "${x}" T2;
 done
 ```
 
