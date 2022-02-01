@@ -24,20 +24,20 @@ class SpatialTransformer(torch.nn.Module):
         theta = torch.Tensor([[[1,0,0],[0,1,0]]]).to(moving, non_blocking=True)
         grid = torch.nn.functional.affine_grid( \
                 theta, moving[0:1].shape, align_corners=False)
-        self.offset = \
+        offset = \
                 self.net(torch.cat([moving, fixed], 1)).permute(0, 2, 3, 1)
-        self.grid = grid + self.offset
-        return self.offset
+        grid = grid + offset
+        return offset, grid
 
-    def warp(self, img, interp=False):
+    def warp(self, img, grid, interp=False):
         warped = torch.nn.functional.grid_sample( \
-                img.float(), self.grid.float(), align_corners=False)
-        if interp and (img.shape != img.shape):
+                img.float(), grid.float(), align_corners=False)
+        if interp and (warped.shape != img.shape):
             warped = torch.nn.functional.interpolate( \
                     warped, size=img.shape[2:])
         return warped
 
-
+'''
 class RecNet(torch.nn.Module):
     def __init__(self, st=True):
         super().__init__()
@@ -68,6 +68,7 @@ class RecNet(torch.nn.Module):
         bridges = list(map(partial(torch.cat, dim=1), zip(features_mid, features_aux)))
         self.rec = self.net_dec(bridges)
         return self.rec
+'''
 
 #class Trans(torch.nn.Module):
 #    def __init__(self):

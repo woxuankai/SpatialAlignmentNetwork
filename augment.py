@@ -47,7 +47,6 @@ def bspline_grid(img):
     grid = grid.permute(0, 2, 3, 1).contiguous()
     return grid
 
-
 def augment(img, rigid=True, bspline=True, grid=None):
     if grid is None:
         assert rigid == True

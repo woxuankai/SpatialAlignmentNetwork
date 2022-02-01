@@ -1,48 +1,58 @@
 import os
 import os.path
-import numpy as np
 import glob
+import json
+import zipfile
+import numpy as np
 import torch
 
 '''
 Ideas on deduplication between checkpoints:
     1. Substitue the f in torch.save with a io.ByteIO file.
         After torch.save, extract the zipfile to destination.
-    2. Save objects seperately in the same folder with torch.save.
+   *2. Save objects seperately in the same folder with np.savez.
     3. More fine-grained saving: save each key:val in state_dict seperately.
 '''
-# class FolderAsZipIO(object):
-#     def __init__(self, folder=None):
-#         super(self).__init__()
-#         self.fd = io.ByteIO()
-# 
-# def save_ckpt(f, state_dict):
-#     assert not os.path.exists(f), folder+' already exists'
-#     #os.mkdir(folder)
-#     state_dict = {key:val.cpu().numpy() for key, val in state_dict.items()}
-#     np.savez(os.path.join(f, '.npy'), **state_dict)
-#     # for key, val in state_dict.items():
-#     #     # with open(folder+'/'+key, 'wb') as f:
-#     #     #    f.write(
-#     #     np.save(os.path.join(folder, key, 'npy'),
-#     return None
-# 
-# def load_state_dicts(f):
-#     assert os.path.isdir(f), folder+' is not a directory'
-
 
 def ckpt_load(folder):
-    assert os.path.isdir(folder)
-    ckpt = {f:torch.load(os.path.join(folder, f), map_location='cpu') \
-            for f in os.listdir(folder)}
+    if os.path.isfile(folder):
+        return torch.load(folder)
+    ckpt = {}
+    for key in os.listdir(folder):
+        save_path = os.path.join(folder, key)
+        if key == 'config':
+            try:
+                ckpt[key] = Config()
+                ckpt[key].load(save_path)
+            except UnicodeDecodeError:
+                ckpt[key] = torch.load(save_path)
+        #elif zipfile.is_zipfile(save_path):
+        #    ckpt[key] = torch.load(save_path, map_location='cpu')
+        #else:
+        #    ckpt[f] = np.load(save_path)
+        #    ckpt[f] = {k:torch.from_numpy(v) for k, v in ckpt[f].items()}
+        else:
+            try:
+                ckpt[key] = torch.load(save_path, map_location='cpu')
+            except RuntimeError as e:
+                ckpt[key] = np.load(save_path)
+                ckpt[key] = {
+                        k:torch.from_numpy(v) for k, v in ckpt[key].items()}
     return ckpt
 
 def ckpt_save(ckpt, folder):
     assert isinstance(ckpt, dict)
-    assert not os.path.exists(folder)
+    assert not os.path.exists(folder), folder+' already exists'
     os.mkdir(folder)
-    for key, val in ckpt.item():
-        torch.save(val, os.path.join(folder, key))
+    for key, val in ckpt.items():
+        save_path = os.path.join(folder, key)
+        if key == 'config':
+            val.save(save_path)
+        else:
+            val = {k:v.cpu().numpy() for k, v in val.items()}
+            f = open(save_path, 'wb')
+            np.savez(f, **val)
+            f.close()
 
 class Config(object):
     def __init__(self, **params):
@@ -52,11 +62,12 @@ class Config(object):
             setattr(self, key, val)
 
     def __setattr__(self, name, value):
-        self.memo.append(name)
+        if name not in self.memo:
+            self.memo.append(name)
         super().__setattr__(name, value)
 
     def __delattr__(self, name):
-        self.memo.pop(self.memo.index(name))
+        self.memo.remove(name)
         super().__delattr__(name)
 
     def __str__(self):
@@ -73,13 +84,29 @@ class Config(object):
     def __contains__(self, item):
         return item in self.memo
 
+    def load(self, save_path):
+        for k in self.memo.copy():
+            self.pop(k)
+        f = open(save_path, 'r')
+        content = json.load(f)
+        f.close()
+        for k, v in content.items():
+            setattr(self, k, v)
+
+    def save(self, save_path):
+        content = {k:getattr(self, k) for k in self.memo}
+        f = open(save_path, 'w')
+        json.dump(content, f)
+        f.close()
+
 class BaseModel(object):
-    def __init__(self, cfg=None, ckpt=None):
+    def __init__(self, cfg=None, ckpt=None, objects=None):
         super().__init__()
         if ckpt is not None:
-            self.load(cfg=cfg, ckpt=ckpt)
+            self.load(cfg=cfg, ckpt=ckpt, objects=objects)
         else:
             self.build(cfg=cfg)
+        self.training = True
 
     def build(self, config):
         self.cfg = config
@@ -129,31 +156,47 @@ class BaseModel(object):
                     and callable(value.load_state_dict):
         '''
 
-    def save(self, ckpt, **objects):
-        if len(objects) == 0:
-            objects = self.get_saveable()
-        objects = {key:value.state_dict() \
-                for key, value in objects.items()}
+    def save(self, ckpt, objects=None):
+        saveable = self.get_saveable()
+        if objects is None:
+            objects = saveable.keys()
+        objects = {key: saveable[key].state_dict() for key in objects}
         if hasattr(self, 'cfg'):
             objects['config'] = self.cfg
         else:
             print('!!! Missing cfg while saving !!!')
-        torch.save(objects, ckpt)
+        #torch.save(objects, ckpt)
+        ckpt_save(objects, ckpt)
 
-    def load(self, ckpt, cfg=None, **objects):
-        ckpt = torch.load(ckpt, map_location='cpu')
+    def load(self, ckpt, cfg=None, objects=None):
+        #ckpt = torch.load(ckpt, map_location='cpu')
+        ckpt = ckpt_load(ckpt)
         if cfg is None:
             cfg = ckpt.pop('config')
         self.build(cfg=cfg)
-        if len(objects) == 0:
-            objects = self.get_saveable()
+        saveable = self.get_saveable()
+        if objects is None:
+            objects = saveable.keys()
+        objects = {key: saveable[key] for key in objects}
         for key, value in objects.items():
-            if key in ckpt.keys():
-                value.load_state_dict(ckpt[key])
-            else:
-                print('!!! Missing key '+key+' in checkpoint !!!')
+            value.load_state_dict(ckpt[key])
 
 if __name__ == '__main__':
+    import sys, os
+    import shutil
+    ckpt = ckpt_load(sys.argv[1])
+    if len(sys.argv) >= 3:
+        ckpt_save(ckpt, sys.argv[2])
+    else:
+        if os.path.isdir(sys.argv[1]):
+            shutil.rmtree(sys.argv[1])
+        elif os.path.isfile(sys.argv[1]):
+            os.remove(sys.argv[1])
+        else:
+            assert False
+        ckpt_save(ckpt, sys.argv[1])
+
+    '''
     cfg = Config(var1=1, var2=2)
     cfg.var3 = 3
     del cfg.var2
@@ -163,3 +206,4 @@ if __name__ == '__main__':
     model = BaseModel(cfg)
     model.save('/tmp/feel_free_to_delete_it.pth')
     model = BaseModel('/tmp/feel_free_to_delete_it.pth')
+    '''

@@ -68,6 +68,8 @@ class StandardMask(Mask):
                 torch.ones_like(thresh, dtype=torch.bool).scatter( \
                 -1, ind, torch.zeros_like(thresh, dtype=torch.bool))
 
+
+'''
 class RandomMask(Mask):
     def __init__(self, sparsity, shape):
         """
@@ -75,12 +77,11 @@ class RandomMask(Mask):
         shape: int, output mask shape
         """
         super().__init__(shape)
-        prob = torch.ones(shape)*sparsity
-        thresh = torch.rand(shape)
-        _, ind = torch.topk(prob - thresh, math.floor(sparsity*shape), dim=-1)
+        _, ind = torch.topk(torch.rand(shape), math.floor(sparsity*shape), dim=-1)
         self.pruned = \
-                torch.ones_like(thresh, dtype=torch.bool).scatter( \
-                -1, ind, torch.zeros_like(thresh, dtype=torch.bool))
+                torch.ones(shape, dtype=torch.bool).scatter( \
+                -1, ind, torch.zeros(shape, dtype=torch.bool))
+'''
 
 class EquispacedMask(Mask):
     def __init__(self, sparsity, shape):

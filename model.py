@@ -1,20 +1,22 @@
-import os, sys, contextlib, time
+import os, sys, contextlib
 import numpy as np
 import torch
 import torch.fft
 
-from masks import Mask, StandardMask, RandomMask, LowpassMask, EquispacedMask, LOUPEMask, TaylorMask
+from masks import Mask, StandardMask, LowpassMask, EquispacedMask, LOUPEMask, TaylorMask
 from basemodel import BaseModel, Config
 import metrics
 from metrics import mi as metrics_mi
-import lnccloss
+from ssimloss import ssimloss
+#import lnccloss
 #from miloss import ms_mi_loss as sim_loss
 #from mineloss import MineLossPatch
-
 from cross import SpatialTransformer
 from gan import loss_gan, NetD, NetG
-from unet import ResNet
+#from unet import ResNet
+from varnet import VarNet
 
+from signal_utils import rss, fft2, ifft2, ifftshift2, fftshift2
 
 def gradient_loss(s):
     assert s.shape[-1] == 2, 'not 2D grid?'
@@ -24,42 +26,6 @@ def gradient_loss(s):
     dx = dx*dx
     d = torch.mean(dx)+torch.mean(dy)
     return d/2.0
-
-def fft2(x):
-    assert len(x.shape) == 4
-    x = torch.fft.fftn(x, dim=(-2, -1), norm='ortho')
-    return x
-
-def ifft2(x):
-    assert len(x.shape) == 4
-    x = torch.fft.ifftn(x, dim=(-2, -1), norm='ortho')
-    return x
-
-def fftshift2(x):
-    assert len(x.shape) == 4
-    x = torch.roll(x, (x.shape[-2]//2, x.shape[-1]//2), dims=(-2, -1))
-    return x
-
-def ifftshift2(x):
-    assert len(x.shape) == 4
-    x = torch.roll(x, ((x.shape[-2]+1)//2, (x.shape[-1]+1)//2), dims=(-2, -1))
-    return x
-
-def rss(x):
-    assert len(x.shape) == 4
-    if torch.is_complex(x):
-        x = x.abs()
-    return torch.norm(x, p=2, dim=1, keepdim=True)
-
-rec_losses = { \
-        'MAE': torch.nn.functional.l1_loss, \
-        'SSIM': lambda x, y: -ssimloss.ssim(x, y)}
-
-mask_losses = {'MASK_MAE': \
-        lambda x: torch.nn.functional.l1_loss(x, torch.zeros_like(x))}
-
-#metrics = {'PSNR': metrics.psnr, 'SSIM': metrics.ssim, \
-#        'MAE': metrics.mae, 'MSE': metrics.mse}#, 'MI': metrics.mi}
 
 masks = {"mask": Mask,
         "taylor": TaylorMask,
@@ -71,28 +37,18 @@ masks = {"mask": Mask,
 
 
 class CSModel(BaseModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.memo_init = (
+                set(self.__dict__.keys()) | set(('memo_init',))).copy()
+
     def build(self, cfg):
         super().build(cfg)
         sparsity = cfg.sparsity
         shape = cfg.shape
-        mask_lr = cfg.mask_lr
+        # mask_lr = cfg.mask_lr
         mask = cfg.mask
-        #if 'wd' in cfg:
-        #    self.cfg.wd = cfg.wd
-        #else:
-        #    self.cfg.wd = 0
-        self.cfg.weight_gan = 0.1
-        self.cfg.weight_gan_sim = 1.0
-        self.cfg.weight_sim = 1.0
-        #self.cfg.wd = cfg.wd
-        if 'coils' in self.cfg:
-            coils = self.cfg.coils
-        else:
-            coils = 1
-        if 'smooth' in cfg:
-            self.cfg.weight_smooth = cfg.smooth
-        else:
-            self.cfg.weight_smooth = 100
+        coils = self.cfg.coils
         assert cfg.lr == 1e-4
         if mask in ["mask", "taylor"]:
             self.net_mask = masks[mask](shape)
@@ -104,7 +60,15 @@ class CSModel(BaseModel):
         self.net_D = NetD(in_channels=2, \
                 layers=([64]*2, [128]*2, [256]*2, [256]*2, [256]*2))
         self.net_T = SpatialTransformer(channels=coils)
-        self.net_R = ResNet(3*coils, 1, [96]*4+[64]*4+[32]*4+[16]*4, res=True)
+        #self.net_R = ResNet(3*coils, 1, [96]*4+[64]*4+[32]*4+[16]*4, res=True)
+        self.net_R = VarNet( \
+                num_cascades=8, \
+                sens_chans=8, \
+                sens_pools=4, \
+                chans=18, \
+                pools=4, \
+                use_ref=True, \
+                )
         self.optim_G = torch.optim.AdamW(self.net_G.parameters(), \
                 lr=cfg.lr, weight_decay=0)
         self.optim_D = torch.optim.AdamW(self.net_D.parameters(), \
@@ -116,7 +80,10 @@ class CSModel(BaseModel):
         self.optim_M = torch.optim.AdamW(self.net_mask.parameters(), \
                 lr=cfg.lr, weight_decay=0)
         #assert self.cfg.reg in ('None', 'Rec', 'Mixed', 'GAN-Only')
-        self.use_amp = False
+        if 'use_amp' in cfg:
+            self.use_amp = cfg.use_amp
+        else:
+            self.use_amp = False
         self.scalar = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
     def set_input(self, img_full, img_aux=None):
@@ -124,6 +91,16 @@ class CSModel(BaseModel):
         if_val = lambda x: x.startswith(('loss_', 'img_', 'metric_'))
         for val_name in list(filter(if_val, self.__dict__.keys())):
             delattr(self, val_name)
+
+        now_keys = set(self.__dict__.keys())
+        more_keys = now_keys - self.memo_init
+        assert len(more_keys) == 0, more_keys
+
+        #print('!!!! ', torch.cuda.max_memory_allocated())
+
+        #tensors = {k: v for k, v in self.__dict__.items() if not isinstance(v, torch.Tensor)}
+        #assert len(tensors) == 0, tensors.keys()
+
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             self.img_full = img_full
             if img_aux is None:
@@ -148,39 +125,58 @@ class CSModel(BaseModel):
         aux_TR, aux_RT = torch.chunk( \
                 self.img_aux_rss, 2, dim=0)
         T = self.net_G(aux_RT)
-        R, RT = torch.chunk(self.net_T.warp(torch.cat((aux_TR,T))), 2)
+        R, RT = torch.chunk(
+            self.net_T.warp(
+                img = torch.cat((aux_TR,T)),
+                grid = self.img_grid
+                ),
+            2)
         TR = self.net_G(R)
         self.img_synth = torch.cat((R, T), dim=0)
         self.img_aligned = torch.cat((TR, RT), dim=0)
-        # loss
+        # gan similarity loss
         self.loss_gan_sim = torch.nn.functional.l1_loss( \
                 self.img_aligned, self.img_full_rss)
         self.loss_all += self.loss_gan_sim * self.cfg.weight_gan_sim
 
     def forwardT(self):
         # translation
-        self.img_offset = self.net_T( \
-        #        moving = self.img_aux_rss, fixed = self.img_sampled_rss)
-                moving = self.img_aux.abs(), fixed = self.img_sampled.abs())
-        self.img_warped = self.net_T.warp(self.img_aux.abs()) #self.img_aux
+        self.img_offset, self.img_grid = self.net_T(
+            moving = self.img_aux.abs(), 
+            fixed = self.img_sampled.abs()
+            )
+        self.img_warped = self.net_T.warp(
+            self.img_aux.abs(),
+            self.img_grid
+            ) #self.img_aux
         self.img_warped_rss = rss(self.img_warped)
-        # loss
+        # smoothness loss
         self.loss_smooth = gradient_loss(self.img_offset)
         self.loss_all += self.loss_smooth * self.cfg.weight_smooth
 
     def forwardR(self):
-        self.img_rec = self.net_R(torch.cat((self.img_warped, \
-                self.img_sampled.real, self.img_sampled.imag), dim=1))
+        self.img_rec = self.net_R(
+                masked_kspace =  self.img_k_sampled, 
+                mask = torch.logical_not(self.net_mask.pruned),
+                ref = self.img_warped,
+                num_low_frequencies = int(self.cfg.shape*self.cfg.sparsity*0.32),
+                )
         # loss
-        self.loss_sim = torch.nn.functional.l1_loss( \
+        self.loss_sim = ssimloss( \
                 self.img_full_rss, self.img_rec)
+        #self.loss_sim = torch.nn.functional.l1_loss( \
+        #        self.img_full_rss, self.img_rec)
         self.loss_all += self.loss_sim * self.cfg.weight_sim
 
     def forwardD(self, D_loss):
+        # fake = torch.cat( \
+        #         (self.img_aligned, self.img_aux_rss), dim=1)
+        # real = torch.cat( \
+        #         (self.img_full_rss, self.img_aux_rss), dim=1)
         fake = torch.cat( \
-                (self.img_aligned, self.img_aux_rss), dim=1)
+                (self.img_aligned, torch.zeros_like(self.img_aligned)), dim=1)
         real = torch.cat( \
-                (self.img_full_rss, self.img_aux_rss), dim=1)
+                (self.img_full_rss, torch.zeros_like(self.img_full_rss)), dim=1)
         if D_loss:
             self.loss_gan_Dfake = loss_gan( \
                     self.net_D(fake.detach()), real=False, D_loss=True)
@@ -207,7 +203,6 @@ class CSModel(BaseModel):
             self.optim_R.zero_grad()
             self.scalar.scale(self.loss_all).backward()
             self.scalar.step(self.optim_R)
-            self.scalar.update()
         elif self.cfg.reg == 'Rec':
             # reconstruction and rec-guided registration
             self.loss_all = 0
@@ -219,11 +214,9 @@ class CSModel(BaseModel):
             self.scalar.scale(self.loss_all).backward()
             self.scalar.step(self.optim_T)
             self.scalar.step(self.optim_R)
-            self.scalar.update()
-            #print(t4-t0, t4-t3, t3-t2, t2-t1, t1-t0)
         elif self.cfg.reg == 'Mixed':
             # reconstruction and GAN-guided registration
-            # update T, G, and R
+            # update T, G, D, and R
             self.loss_all = 0
             with torch.cuda.amp.autocast(enabled=self.use_amp):
                 self.forwardT()
@@ -237,7 +230,6 @@ class CSModel(BaseModel):
             self.scalar.step(self.optim_T)
             self.scalar.step(self.optim_G)
             self.scalar.step(self.optim_R)
-            # self.scalar.update()
             # update D
             self.loss_all = 0#torch.tensor(0, dtype=torch.float)
             with torch.cuda.amp.autocast(enabled=self.use_amp):
@@ -245,7 +237,6 @@ class CSModel(BaseModel):
             self.optim_D.zero_grad()
             self.scalar.scale(self.loss_all).backward()
             self.scalar.step(self.optim_D)
-            # self.scalar.update()
         elif self.cfg.reg == 'GAN-Only':
             # GAN-guided registration only
             # update T and G
@@ -259,7 +250,6 @@ class CSModel(BaseModel):
             self.scalar.scale(self.loss_all).backward()
             self.scalar.step(self.optim_T)
             self.scalar.step(self.optim_G)
-            # self.scalar.update()
             # update D
             self.loss_all = 0#torch.tensor(0, dtype=torch.float)
             with torch.cuda.amp.autocast(enabled=self.use_amp):
@@ -267,10 +257,10 @@ class CSModel(BaseModel):
             self.optim_D.zero_grad()
             self.scalar.scale(self.loss_all).backward()
             self.scalar.step(self.optim_D)
-            self.scalar.update()
         else:
             assert False
         del self.loss_all
+        self.scalar.update()
 
     def test(self):
         assert self.training == False
@@ -290,8 +280,9 @@ class CSModel(BaseModel):
                 if self.cfg.reg == 'GAN-Only':
                     returnVal = -self.metric_MI
                 else:
-                    returnVal = self.loss_all.cpu().item()
-                del self.loss_all
+                    # returnVal = self.loss_all.cpu().item()
+                    returnVal = -self.metric_PSNR
+                #del self.loss_all
         return returnVal # return reconstruciton loss
 
     def prune(self, *args, **kwargs):
@@ -307,7 +298,7 @@ class CSModel(BaseModel):
                     lambda x: x.startswith('loss_'), self.__dict__.keys()):
                 loss_val = getattr(self, loss_name)
                 if loss_val is not None:
-                    vis['scalars'][loss_name] = loss_val.item()
+                    vis['scalars'][loss_name] = loss_val.detach().item()
             for metric_name in filter( \
                     lambda x: x.startswith('metric_'), self.__dict__.keys()):
                 metric_val = getattr(self, metric_name)
@@ -329,27 +320,103 @@ class CSModel(BaseModel):
                         'values': self.net_mask.weight.detach()}
         return vis
 
-
 if __name__ == '__main__':
+    import ptflops, time#,  tracemalloc, time
+    def measure_time(n, f):
+        is_cuda = next(n.parameters()).is_cuda
+        f = f(None)
+        repeat = 500 if is_cuda else 5
+        if is_cuda: n(**f)
+        if is_cuda: torch.cuda.synchronize()
+        t1 = time.time()
+        for _ in range(repeat):
+            n(**f)
+        if is_cuda: torch.cuda.synchronize()
+        t2 = time.time()
+        return (t2 - t1)/repeat
+    
+    def measure_memory(n, f):
+        is_cuda = next(n.parameters()).is_cuda
+        if not is_cuda: return -1
+        f = f(None)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_max_memory_allocated()
+        m1 = torch.cuda.memory_allocated()
+        n(**f)
+        m2 = torch.cuda.max_memory_allocated()
+        return m2 - m1
+        '''
+        tracemalloc.start()
+        s1, p1 = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        n(**f(None))
+        s2, p2 = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return p2
+        '''
+    
     cfg = Config()
-    cfg.sparsity = 1.0/8
-    cfg.lr = 0.001
-    cfg.mask_lr = 0.001
-    cfg.st = True
-    cfg.shape = 256
-    cfg.mask = 'mask'
+    cfg.sparsity = 0.125
+    cfg.lr = 0.0001
+    cfg.shape = 320
+    cfg.coils = 1
+    cfg.reg = 'Mixed'
+    cfg.mask = 'equispaced'
+    cfg.weight_smooth = 1000
+    cfg.weight_gan = 0.01
+    cfg.weight_gan_sim = 0.1
+    cfg.weight_sim = 1
+    cfg.use_amp = False
     net = CSModel(cfg)
     device = 'cuda'
-    full_img = torch.rand(3, 2, 256, 256).to(device)
-    aux_img = torch.rand(3, 2, 256, 256).to(device)
-    net.to(device)
-    net.train()
-    net.set_input(img_full=full_img, img_aux=aux_img)
-    net.update()
-    print(net.get_vis())
-    net.eval()
-    net.set_input(img_full=full_img, img_aux=aux_img)
-    net.test()
-    print(net.get_vis())
+    full_img = torch.rand(1, cfg.coils, cfg.shape, cfg.shape, \
+            dtype=torch.complex64).to(device)
+    aux_img = torch.rand(1, cfg.coils, cfg.shape, cfg.shape, \
+            dtype=torch.complex64).to(device)
+    net = net.to(device)
 
+    torch.torch.set_grad_enabled(False)
+
+    # Net D
+    f = lambda x: {'x': torch.cat([rss(full_img)]*2, dim=1)}
+    n = net.net_D
+    macs, params = ptflops.get_model_complexity_info(n, (0,), \
+            as_strings=True, input_constructor=f, print_per_layer_stat=False)
+    t = measure_time(n, f)*1000
+    m = measure_memory(n, f)/1024/1024
+    print('NetD', macs+';', params+' Parameters', \
+            f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
+    
+    # Net G
+    f = lambda x: {'x': rss(full_img)}
+    n = net.net_G
+    macs, params = ptflops.get_model_complexity_info(n, (0,), \
+            as_strings=True, input_constructor=f, print_per_layer_stat=False)
+    t = measure_time(n, f)*1000
+    m = measure_memory(n, f)/1024/1024
+    print('NetG', macs+';', params+' Parameters', \
+            f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
+
+    # Net T
+    f = lambda x: {'moving': aux_img.abs(), 'fixed': full_img.abs()}
+    n = net.net_T
+    macs, params = ptflops.get_model_complexity_info(n, (0,), \
+            as_strings=True, input_constructor=f, print_per_layer_stat=False)
+    t = measure_time(n, f)*1000
+    m = measure_memory(n, f)/1024/1024
+    print('NetT', macs+';', params+' Parameters', \
+            f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
+
+    # Net R
+    # f = lambda x: {'masked_kspace': full_img, \
+    #         'mask': torch.ones(cfg.shape).to(device) > 0.5, \
+    #         'ref': None, \
+    #         'num_low_frequencies': int(cfg.shape*cfg.sparsity*0.32)}
+    n = net.net_R
+    macs, params = ptflops.get_model_complexity_info(n, (0,), \
+            as_strings=True, input_constructor=f, print_per_layer_stat=False)
+    t = measure_time(n, f)*1000
+    m = measure_memory(n, f)/1024/1024
+    print('NetR', macs+';', params+' Parameters', \
+            f'{t:.2f} ms Time;', f'{m:.2f} M Memory;')
 

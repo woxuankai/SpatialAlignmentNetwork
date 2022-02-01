@@ -2,6 +2,7 @@
 
 import os, sys, os.path
 import random, time, statistics, glob, math
+import shutil
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -62,14 +63,18 @@ def main(args):
     cfg = Config()
     cfg.sparsity = args.sparsity
     cfg.lr = args.lr
-    cfg.mask_lr = args.mask_lr
+    #cfg.mask_lr = args.mask_lr
     cfg.shape = args.crop
     cfg.coils = args.coils
     #cfg.tt = args.tt
     cfg.reg = args.reg
     #cfg.rec = args.rec
     cfg.mask = args.mask
-    cfg.smooth = args.smooth_weight
+    cfg.weight_smooth = args.smooth_weight
+    cfg.weight_gan = args.gan_weight
+    cfg.weight_gan_sim = args.gan_sim_weight
+    cfg.weight_sim = args.sim_weight
+    cfg.use_amp = args.use_amp
     #cfg.sim = args.sim_weight
     #cfg.mask_losses = {}
     #for item in args.mask_losses:
@@ -97,7 +102,6 @@ def main(args):
     iter_cnt = 0
     ckpt = None
     if args.resume is not None:
-        assert args.copy_mask is None
         if args.resume == '': # load latest
             ckpts = glob.glob(args.logdir+'/ckpt/ckpt_*.pt')
             ckpts += glob.glob(args.logdir+'/ckpt/ckpt_*.pth')
@@ -107,21 +111,20 @@ def main(args):
             ckpts = sorted(ckpts, key=os.path.getmtime)
             ckpt = ckpts[-1]
             iter_cnt = int(ckpt.split('.')[-2].split('_')[-1])
-            net = Model(ckpt=ckpt, cfg=cfg)
-            print('load latest ckpt from:', ckpt, iter_cnt)
+            print('Will load latest ckpt from:', ckpt,
+                    ', cnt:', iter_cnt,
+                    ', load nets:', args.load_nets)
         else: # load specific ckpt
-            if os.path.isfile(args.resume):
-                net = Model(ckpt=args.resume, cfg=cfg)
-                print('copying ckpt from:', args.resume, iter_cnt)
-            else:
-                raise FileNotFoundError
-        #print('config overridden by loaded checkpoint!')
+            print('Will load specified ckpt from:', args.resume,
+                    ', cnt:', iter_cnt,
+                    ', load nets:', args.load_nets)
+            ckpt = args.resume
+        net = Model(ckpt=ckpt, cfg=cfg, objects=args.load_nets)
     else:
+        assert args.load_nets is None
         print('training from scratch...')
         net = Model(cfg=cfg)
-        if args.copy_mask is not None:
-            print('copying mask from :', args.copy_mask)
-            net.net_mask = Model(ckpt=args.copy_mask).net_mask
+
     print(net.cfg)
     cfg = net.cfg
     random.seed(int(time.time()))
@@ -212,6 +215,7 @@ def main(args):
             #    net.update()
             #print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
             net.update()
+            del batch
             #t4 = time.time()
 
             time_start = time.time()
@@ -226,19 +230,22 @@ def main(args):
                             tag='train/'+name, \
                             global_step=iter_cnt, \
                             **val)
+                del vis, name, val
             if (iter_cnt % 1000 == 0) or \
                     ((iter_cnt < 10000) and (iter_cnt % 100 == 0)):
                 last_disp = iter_cnt
                 net.eval()
                 # visualize image
-                net.set_input(*batch_vis)
-                net.test()
+                with torch.no_grad():
+                    net.set_input(*batch_vis)
+                    net.test()
                 vis = net.get_vis('images')
                 for name, val in vis['images'].items():
                     torchvision.utils.save_image(val, \
                         args.logdir+'/res/'+'%010d_'%iter_cnt+name+'.jpg', \
                         nrow=len_vis//col_vis, padding=10, \
                         range=(0, 1), pad_value=0.5)
+                del vis, name, val
             if (iter_cnt % 5000 == 0) or \
                     ((iter_cnt < 10000) and (iter_cnt % 1000 == 0)):
                 # 3000 should be dividable by 250
@@ -265,40 +272,47 @@ def main(args):
         stat_eval  = []
         stat_loss = []
         time_start = time.time()
-        for batch in tqdm_iter:
-            time_data = time.time() - time_start
-            batch = [x.to(device, non_blocking=True) for x in batch]
-            net.set_input(*batch)
-            stat_loss.append(net.test())
-            vis = net.get_vis('scalars')
-            stat_eval.append(vis['scalars'])
-            time_start = time.time()
-            if time_data >= 0.1:
-                postfix += ' data %.1f'%time_data
-        vis = {key: statistics.mean([x[key] for x in stat_eval]) \
-                for key in stat_eval[0]}
-        for name, val in vis.items():
-            writer.add_scalar('val/'+name, val, iter_cnt)
-        loss_current = statistics.mean(stat_loss)
-        if args.intel_stop > 0:
-            # intel_stop is enabled
-            if (loss_best is None) or (loss_current < loss_best):
-                # new record
-                loss_best = loss_current
-                iter_best = iter_cnt
-                net.save(args.logdir+'/ckpt/best.pt')
-            else:
-                # worse than best
-                if iter_cnt >= args.intel_stop + iter_best:
-                    # no better result after intel_stop iterations
-                    signal_end=True
-        #writer.add_scalar('val/temp_loss_best', loss_best, iter_cnt)
+        with torch.no_grad():
+            for batch in tqdm_iter:
+                time_data = time.time() - time_start
+                batch = [x.to(device, non_blocking=True) for x in batch]
+                net.set_input(*batch)
+                stat_loss.append(net.test())
+                del batch
+                vis = net.get_vis('scalars')
+                stat_eval.append(vis['scalars'])
+                time_start = time.time()
+                if time_data >= 0.1:
+                    postfix += ' data %.1f'%time_data
+            vis = {key: statistics.mean([x[key] for x in stat_eval]) \
+                    for key in stat_eval[0]}
+            for name, val in vis.items():
+                writer.add_scalar('val/'+name, val, iter_cnt)
+            loss_current = statistics.mean(stat_loss)
+            del vis
+            if args.intel_stop > 0:
+                # intel_stop is enabled
+                if (loss_best is None) or (loss_current < loss_best):
+                    # new record
+                    loss_best = loss_current
+                    iter_best = iter_cnt
+                    if os.path.exists(args.logdir+'/ckpt/best.pt'):
+                        shutil.rmtree(args.logdir+'/ckpt/best.pt')
+                    net.save(args.logdir+'/ckpt/best.pt')
+                else:
+                    # worse than best
+                    if iter_cnt >= args.intel_stop + iter_best:
+                        # no better result after intel_stop iterations
+                        signal_end=True
+                        print('signal_end set due to intel_stop')
+            #writer.add_scalar('val/temp_loss_best', loss_best, iter_cnt)
         #writer.add_scalar('val/temp_loss_current', loss_current, iter_cnt)
 
-    net.save(args.logdir+'/ckpt/ckpt_%010d.pt'%iter_cnt)
-    print('saved final ckpt:', args.logdir+'/ckpt/ckpt_%010d.pt'%iter_cnt)
+    print('reached end of training loop, and signal_end is '+str(signal_end))
     writer.flush()
     writer.close()
+    net.save(args.logdir+'/ckpt/ckpt_%010d.pt'%iter_cnt)
+    print('saved final ckpt:', args.logdir+'/ckpt/ckpt_%010d.pt'%iter_cnt)
 
 
 if __name__ == '__main__':
@@ -329,6 +343,12 @@ if __name__ == '__main__':
             type=str, required=True, help='path for storage and checkpoint')
     parser.add_argument('--resume', type=str, default=None, \
             help='with ckpt path, set empty str to load latest ckpt')
+    parser.add_argument(
+            '--load_nets',
+            type=str,
+            nargs='*',
+            default=None,
+            help='neural networks to be loaded in the checkpoint')
     parser.add_argument('--epoch', type=int, default=150, \
             help='epochs to train')
     parser.add_argument('--batch_size', type=int, default=10, \
@@ -352,15 +372,21 @@ if __name__ == '__main__':
     #parser.add_argument('--rec_losses', type=str, required=True, nargs='*', \
     #        help='losses for reconstruction', \
     #        metavar='NAME1:WEIGHT1 NAME2:WEIGHT2')
-    parser.add_argument('--mask_losses', type=str, required=True, nargs='*', \
-            help='losses for mask',
-            metavar='NAME1:WEIGHT1 NAME2:WEIGHT2')
-    parser.add_argument('--smooth_weight', type=float, default=100, \
+    #parser.add_argument('--mask_losses', type=str, required=True, nargs='*', \
+    #        help='losses for mask',
+    #        metavar='NAME1:WEIGHT1 NAME2:WEIGHT2')
+    parser.add_argument('--smooth_weight', type=float, required=True, \
             help='weight for deformation field smoothness',
             metavar='Float')
-    #parser.add_argument('--sim_weight', type=float, required=True, \
-    #        help='weight for registration similarity loss',
-    #        metavar='Float')
+    parser.add_argument('--gan_weight', type=float, required=True, \
+            help='weight for discriminator',
+            metavar='Float')
+    parser.add_argument('--gan_sim_weight', type=float, required=True, \
+            help='weight for cross modality synthesis',
+            metavar='Float')
+    parser.add_argument('--sim_weight', type=float, required=True, \
+            help='weight for reconstruction similarity loss',
+            metavar='Float')
     # mask
     parser.add_argument('--mask', metavar='type', \
             #choices=['learnable', 'uniform', 'standard'], \
@@ -368,8 +394,8 @@ if __name__ == '__main__':
     parser.add_argument('--sparsity', metavar='0-1', \
                 type=float, default=None, \
                 help='desired overall sparisity of masks without sparsity')
-    parser.add_argument('--mask_lr', type=float, default=1e-3, \
-            help='learning rate for mask')
+    #parser.add_argument('--mask_lr', type=float, default=1e-3, \
+    #        help='learning rate for mask')
     # data
     parser.add_argument('--train', metavar='/path/to/training_data', \
             required=True, type=str, help='path to training data')
@@ -385,17 +411,13 @@ if __name__ == '__main__':
     parser.add_argument('--aux_aug', type=str, required=True, \
             choices=augment_funcs.keys(),
             help='data augmentation aux image')
-    parser.add_argument('--greedy', action='store_true')
     parser.add_argument('--prefetch', action='store_true')
-    parser.add_argument('--copy_mask',
-            type=str, help='use existing mask')
+    parser.add_argument('--use_amp', action='store_true')
+    parser.add_argument('--force_gpu', action='store_true')
     args = parser.parse_args()
 
-    autoGPU()
-    if args.greedy:
-        tmp = int(torch.cuda.get_device_properties(0).total_memory*0.9/4)
-        tmp = torch.zeros(tmp).cuda()
-        del tmp
+    if not args.force_gpu:
+        autoGPU()
 
     main(args)
 

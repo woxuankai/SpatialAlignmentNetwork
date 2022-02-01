@@ -104,14 +104,22 @@ def autoGPU():
         time.sleep(INTERVAL)
     os.environ["CUDA_VISIBLE_DEVICES"]=str(GPU)
     # occupy required gpu memory
-    foo = torch.zeros((int(GPU_MEM_MIN*1024**2/4),), \
-            dtype=torch.float32, device='cuda')
+    #foo = torch.zeros((int(GPU_MEM_MIN*1024**2/4),), \
+    #        dtype=torch.float32, device='cuda')
+    foo = []
+    flag_stop = False
+    while not flag_stop:
+        try:
+            foo.append(torch.zeros((1024,1024,1024//32), device='cuda'))
+        except RuntimeError as e:
+            flag_stop = True
     del foo
     locker.unlock()
     print('=> lock released')
 
 if __name__ == '__main__':
     autoGPU()
+    time.sleep(10)
     print(torch.cuda.memory_allocated(), torch.cuda.memory_cached())
     torch.cuda.empty_cache()
     print(torch.cuda.memory_allocated(), torch.cuda.memory_cached())

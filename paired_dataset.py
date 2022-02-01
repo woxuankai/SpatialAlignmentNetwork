@@ -72,6 +72,20 @@ class VolumeDataset(torch.utils.data.Dataset):
         if len(i.shape) == 2: i = i[None, :, :]
         return i.astype(np.complex64)
 
+class DummyVolumeDataset(torch.utils.data.Dataset):
+    def __init__(self, ref):
+        super().__init__()
+        sample = ref[0]
+        self.shape = sample.shape
+        self.dtype = sample.dtype
+        self.len = len(ref)
+
+    def __len__(self):
+        return self.len
+
+    def __getitem__(self, index):
+        return np.zeros(self.shape, dtype=self.dtype)
+
 class AlignedVolumesDataset(torch.utils.data.Dataset):
     def __init__(self, *volumes, protocals, \
             crop=None, q=0, flatten_channels=False):
@@ -82,6 +96,7 @@ class AlignedVolumesDataset(torch.utils.data.Dataset):
         assert len({x[0].shape for x in volumes}) == 1
         self.crop = crop
         volumes = {volume.protocal:volume for volume in volumes}
+        volumes['None'] = DummyVolumeDataset(next(iter(volumes.values())))
         for x in protocals:
             assert x in volumes.keys(), x+' not found in '+str(volumes.keys())
         volumes = [volumes[protocal] for protocal in protocals]
