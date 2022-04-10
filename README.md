@@ -60,12 +60,12 @@ done | parallel --bar
 ```
 3. Convert selected nii to h5.
 ```bash
-# T1 modality
+# T1 weighted
 cat t1_t2_paired_6875_{train,val,test}.csv | cut -f1 -d ',' | while read x; \
 do python3 convert_fastMRIDICOM.py "${x%.h5}.nii" "${x}" T1; \
 done
-# T2 modality
-cat t1_t2_paired_6875_train.csv t1_t2_paired_6875_val.csv | cut -f2 -d ',' | while read x; \
+# T2 weighted
+cat t1_t2_paired_6875_{train,val,test}.csv | cut -f2 -d ',' | while read x; \
 do python3 convert_fastMRIDICOM.py "${x%.h5}.nii" "${x}" T2;
 done
 ```
