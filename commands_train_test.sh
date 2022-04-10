@@ -1,11 +1,14 @@
-TRAIN="${PWD}/T1Flair_T2Flair_T2_train.csv"
-VAL="${PWD}/T1Flair_T2Flair_T2_val.csv"
-export CUDA_VISIBLE_DEVICES=0
-LOG_BASE="${PWD}"
+TRAIN="${PWD}/fastMRI_brain_DICOM/t1_t2_paired_6875_train.csv"
+VAL="${PWD}/fastMRI_brain_DICOM/t1_t2_paired_6875_val.csv"
+LOG_BASE="${PWD}/LOG"
+mkdir -p ${LOG_BASE}
 COILS=1
 TGT=T2
 REF=T1
-FLAGS='--prefetch'
+FLAGS='--prefetch --force_gpu'
+export CUDA_VISIBLE_DEVICES=0
+mkdir -p ${LOG_BASE}
+
 
 # Training
 
@@ -37,8 +40,8 @@ python3 train.py --logdir ${LOG_BASE}/${REF}_${NAME}${TGT}_PBSplineProposed --tr
 
 # Testing
 
-EVAL_BASE=${PWD}/'eval'
-DATA_TEST=${PWD}/'t1_t2_paired_6875_test.csv'
+EVAL_BASE='${PWD}/eval'
+DATA_TEST='${PWD}/fastMRI_brain_DICOM/t1_t2_paired_6875_test.csv'
 AUX_AUG='-1'
 
 function run_test(){
