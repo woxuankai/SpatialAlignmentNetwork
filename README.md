@@ -45,7 +45,7 @@ conventional deep-learning-based reconstruction is shown in black
 arrows; and the red arrows are for additional data flow related to
 our proposed spatial alignment network.
 
-For more details on the proposed method, please refer to [arXiv preprint arXiv:2108.05603](https://arxiv.org/abs/2108.05603).
+For more details on the proposed method, please refer to [https://ieeexplore.ieee.org/document/9745968](https://ieeexplore.ieee.org/document/9745968).
 
 ## Experiments on fastMRI DICOM
 ### Prepare data
@@ -72,3 +72,16 @@ done
 
 ### Training & Evaluation
 Run `commands_train_eval.sh` to start training and evaluation of methods.
+
+## Cite This
+```
+@ARTICLE{9745968,
+  author={Xuan, Kai and Xiang, Lei and Huang, Xiaoqian and Zhang, Lichi and Liao, Shu and Shen, Dinggang and Wang, Qian},
+  journal={IEEE Transactions on Medical Imaging}, 
+  title={Multi-Modal MRI Reconstruction Assisted with Spatial Alignment Network}, 
+  year={2022},
+  volume={},
+  number={},
+  pages={1-1},
+  doi={10.1109/TMI.2022.3164050}}
+```
